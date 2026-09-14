@@ -1,7 +1,8 @@
 -- =====================================================
--- BOT ROBLOX - STEAL AN EGG
--- Reste sur le tapis sauf si course détectée
--- Vole les œufs rares automatiquement
+-- BOT ROBLOX - STEAL AN EGG (VERSION AUTO CHAT)
+-- Écoute AUTOMATIQUEMENT le chat de tous les joueurs
+-- Détecte les messages mentionnant des œufs rares
+-- Extrait le NOM et la ZONE automatiquement
 -- =====================================================
 
 local Players = game:GetService("Players")
@@ -17,103 +18,165 @@ local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 -- =====================================================
 
 local CONFIG = {
-    -- Positions
-    TAPIS_POSITION = Vector3.new(0, 5, 0),  -- Ajuster selon votre map
-    SPAWN_EGGS = Vector3.new(50, 5, 50),    -- Zone de spawn des œufs
-    
-    -- Détection
-    DETECT_RADIUS = 100,                    -- Rayon de détection des œufs
-    RARE_EGG_COLORS = {                     -- Couleurs des œufs rares
-        Color3.fromRGB(255, 215, 0),        -- Or
-        Color3.fromRGB(75, 0, 130),         -- Indigo
-        Color3.fromRGB(255, 20, 147),       -- Rose foncé
-    },
-    
-    -- Vitesses
-    WALK_SPEED = 16,
-    SPRINT_SPEED = 25,
-    
-    -- Seuils
-    RARE_EGG_VALUE = 500,                   -- Valeur minimale d'un œuf rare
-    RACE_TIMEOUT = 30,                      -- Timeout de course en secondes
+    TAPIS_POSITION = Vector3.new(0, 5, 0),
+    DETECT_RADIUS = 300,
+    DEBUG = true,
 }
 
 -- =====================================================
 -- VARIABLES GLOBALES
 -- =====================================================
 
-local isRacing = false
-local raceEndTime = 0
-local lastEggTarget = nil
+local isHunting = false
+local targetEggName = nil
+local targetPosition = nil
+local targetEggPart = nil
 local onTapis = true
+local lastHuntTime = 0
 
 -- =====================================================
--- FONCTIONS UTILITAIRES
+-- FONCTIONS
 -- =====================================================
+
+local function log(message)
+    if CONFIG.DEBUG then
+        print("[🤖 STEAL-EGG-AUTO] " .. message)
+    end
+end
 
 local function distance(pos1, pos2)
     return (pos1 - pos2).Magnitude
 end
 
-local function isRareEgg(part)
-    -- Vérifier si c'est un œuf
-    if not part or not part:IsA("BasePart") then return false end
-    if not part.Name:match("Egg") and not part.Name:match("egg") then return false end
+local function extractEggInfo(message)
+    -- Extraire automatiquement le NOM de l'œuf et la ZONE du message du chat
     
-    -- Vérifier la couleur (œuf rare)
-    local partColor = part.Color
-    for _, rareColor in ipairs(CONFIG.RARE_EGG_COLORS) do
-        local diff = math.abs(partColor.R - rareColor.R) + 
-                     math.abs(partColor.G - rareColor.G) + 
-                     math.abs(partColor.B - rareColor.B)
-        if diff < 0.2 then
-            return true
+    log("📝 Analyse du message: " .. message)
+    
+    -- Vérifier si c'est un message sur un œuf rare
+    local lowerMsg = message:lower()
+    if not (lowerMsg:match("rare") and lowerMsg:match("egg")) and 
+       not lowerMsg:match("oeufs?%s+rare") then
+        return nil
+    end
+    
+    log("✅ Message d'œuf rare détecté!")
+    
+    local eggInfo = {
+        name = nil,
+        position = nil
+    }
+    
+    -- ============================================
+    -- EXTRAIRE LE NOM DE L'ŒUF
+    -- ============================================
+    
+    -- Pattern 1: "egg: EggRare" ou "egg: Egg_Gold"
+    eggInfo.name = message:match("egg[%s:]*([%w_]+)")
+    if eggInfo.name then
+        log("📛 Nom trouvé (pattern 1): " .. eggInfo.name)
+        if not eggInfo.name:match("^Egg") then
+            eggInfo.name = "Egg" .. eggInfo.name
         end
     end
     
-    return false
-end
-
-local function detectNearbyEggs()
-    local found = {}
-    local workspace = game:GetService("Workspace")
-    
-    for _, part in ipairs(workspace:FindPartBoundsInRadius(humanoidRootPart.Position, CONFIG.DETECT_RADIUS)) do
-        if isRareEgg(part) then
-            table.insert(found, part)
+    -- Pattern 2: nom entre guillemets "EggRare"
+    if not eggInfo.name then
+        eggInfo.name = message:match('"([^"]+)"')
+        if eggInfo.name then
+            log("📛 Nom trouvé (pattern 2): " .. eggInfo.name)
         end
     end
     
-    -- Trier par distance
-    table.sort(found, function(a, b)
-        return distance(humanoidRootPart.Position, a.Position) < 
-               distance(humanoidRootPart.Position, b.Position)
-    end)
-    
-    return found
-end
-
-local function detectRace()
-    -- Vérifier s'il y a une course active (joueurs qui se déplacent rapidement)
-    local playersMoving = 0
-    
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= player and p.Character then
-            local otherHRP = p.Character:FindFirstChild("HumanoidRootPart")
-            if otherHRP then
-                local velocity = otherHRP.AssemblyLinearVelocity.Magnitude
-                if velocity > 20 then  -- Seuil de vitesse haute
-                    playersMoving = playersMoving + 1
-                end
+    -- Pattern 3: œuf rare <nom>
+    if not eggInfo.name then
+        eggInfo.name = message:match("œuf%s+rare%s+([%w_]+)")
+        if eggInfo.name then
+            log("📛 Nom trouvé (pattern 3): " .. eggInfo.name)
+            if not eggInfo.name:match("^Egg") then
+                eggInfo.name = "Egg" .. eggInfo.name
             end
         end
     end
     
-    return playersMoving > 0
+    -- ============================================
+    -- EXTRAIRE LES COORDONNÉES
+    -- ============================================
+    
+    -- Pattern 1: "x, y, z" ou "x,y,z"
+    local x, y, z = message:match("([%-]?%d+)[,%s]+([%-]?%d+)[,%s]+([%-]?%d+)")
+    if x and y and z then
+        eggInfo.position = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+        log("📍 Position trouvée: (" .. x .. ", " .. y .. ", " .. z .. ")")
+    end
+    
+    -- Pattern 2: "zone: X Y Z"
+    if not eggInfo.position then
+        x, y, z = message:match("zone[%s:]+([%-]?%d+)%s+([%-]?%d+)%s+([%-]?%d+)")
+        if x and y and z then
+            eggInfo.position = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+            log("📍 Zone trouvée: (" .. x .. ", " .. y .. ", " .. z .. ")")
+        end
+    end
+    
+    -- Si pas de position exacte, chercher une zone/région
+    if not eggInfo.position then
+        if lowerMsg:match("spawn") then
+            eggInfo.position = Vector3.new(50, 10, 50)
+            log("📍 Zone: Spawn")
+        elseif lowerMsg:match("cave") then
+            eggInfo.position = Vector3.new(100, 10, 100)
+            log("📍 Zone: Cave")
+        elseif lowerMsg:match("mountain") or lowerMsg:match("montagne") then
+            eggInfo.position = Vector3.new(150, 50, 150)
+            log("📍 Zone: Montagne")
+        end
+    end
+    
+    -- Vérifier qu'on a trouvé au moins le nom
+    if not eggInfo.name then
+        log("❌ Impossible d'extraire le nom de l'œuf")
+        return nil
+    end
+    
+    log("🎯 Infos extraites: " .. eggInfo.name .. " @ " .. tostring(eggInfo.position))
+    return eggInfo
+end
+
+local function findEggByName(eggName, searchArea)
+    -- Chercher l'œuf avec le NOM EXACT dans la zone
+    local workspace = game:GetService("Workspace")
+    
+    local success, allParts = pcall(function()
+        return workspace:FindPartBoundsInRadius(searchArea, CONFIG.DETECT_RADIUS)
+    end)
+    
+    if not success then
+        log("⚠️ Erreur de détection")
+        return nil
+    end
+    
+    -- Match EXACT
+    for _, part in ipairs(allParts) do
+        if part.Name == eggName then
+            log("✅ Œuf trouvé: " .. part.Name .. " @ " .. tostring(part.Position))
+            return part
+        end
+    end
+    
+    -- Match partiel (case-insensitive)
+    for _, part in ipairs(allParts) do
+        if part.Name:lower():match(eggName:lower()) then
+            log("⚠️ Match partiel: " .. part.Name)
+            return part
+        end
+    end
+    
+    log("❌ Œuf '" .. eggName .. "' non trouvé")
+    return nil
 end
 
 local function moveToPosition(targetPos)
-    -- Utiliser des humanoid pour se déplacer
     local humanoid = character:FindFirstChild("Humanoid")
     if humanoid then
         humanoid:MoveTo(targetPos)
@@ -122,94 +185,205 @@ end
 
 local function returnToTapis()
     if not onTapis then
-        print("[BOT] Retour au tapis...")
+        log("↩️ Retour au tapis")
         moveToPosition(CONFIG.TAPIS_POSITION)
         onTapis = true
+        isHunting = false
+        targetEggName = nil
+        targetPosition = nil
+        targetEggPart = nil
     end
 end
 
-local function chaseEgg(eggPart)
-    if not eggPart or not eggPart.Parent then
-        lastEggTarget = nil
-        return false
-    end
+-- =====================================================
+-- ÉCOUTE AUTOMATIQUE DU CHAT
+-- =====================================================
+
+local function setupChatListener()
+    log("🔧 Initialisation de l'écoute du chat...")
     
-    print("[BOT] Chasse d'un œuf rare détecté!")
-    moveToPosition(eggPart.Position)
-    onTapis = false
-    lastEggTarget = eggPart
-    return true
+    -- Chercher les remotes de chat
+    local success, err = pcall(function()
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        
+        -- Si le jeu utilise un système de chat personnalisé
+        if ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents") then
+            local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            local messagePosted = chatEvents:FindFirstChild("OnMessageDoneFiltering")
+            
+            if messagePosted then
+                messagePosted.OnClientEvent:Connect(function(message)
+                    log("💬 Chat: " .. message.Message)
+                    
+                    local eggInfo = extractEggInfo(message.Message)
+                    if eggInfo then
+                        isHunting = true
+                        targetEggName = eggInfo.name
+                        targetPosition = eggInfo.position
+                        targetEggPart = nil
+                        lastHuntTime = tick()
+                        log("🚨 CHASSE LANCÉE!")
+                    end
+                end)
+                
+                log("✅ Écoute du chat activée (DefaultChatSystem)")
+            end
+        end
+    end)
+    
+    -- Alternative: écouter via Chatted signal
+    if not success or not chat_listener_active then
+        log("⚠️ Utilisation de la méthode alternative...")
+        
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= player then
+                plr.Chatted:Connect(function(message)
+                    log("💬 [" .. plr.Name .. "]: " .. message)
+                    
+                    local eggInfo = extractEggInfo(message)
+                    if eggInfo then
+                        isHunting = true
+                        targetEggName = eggInfo.name
+                        targetPosition = eggInfo.position
+                        targetEggPart = nil
+                        lastHuntTime = tick()
+                        log("🚨 CHASSE LANCÉE!")
+                    end
+                end)
+            end
+        end
+        
+        -- Connecter les nouveaux joueurs
+        Players.PlayerAdded:Connect(function(newPlayer)
+            if newPlayer ~= player then
+                newPlayer.Chatted:Connect(function(message)
+                    log("💬 [" .. newPlayer.Name .. "]: " .. message)
+                    
+                    local eggInfo = extractEggInfo(message)
+                    if eggInfo then
+                        isHunting = true
+                        targetEggName = eggInfo.name
+                        targetPosition = eggInfo.position
+                        targetEggPart = nil
+                        lastHuntTime = tick()
+                        log("🚨 CHASSE LANCÉE!")
+                    end
+                end)
+            end
+        end)
+        
+        log("✅ Écoute du chat activée (Chatted events)")
+    end
 end
 
 -- =====================================================
 -- BOUCLE PRINCIPALE
 -- =====================================================
 
-local mainLoop = RunService.Heartbeat:Connect(function()
-    -- Vérifier si le joueur est vivant
-    if not character or character:FindFirstChild("Humanoid").Health <= 0 then
+local huntLoop = RunService.Heartbeat:Connect(function()
+    if not character or not character:FindFirstChild("Humanoid") then
         return
     end
     
-    -- Détecter si une course est en cours
-    if detectRace() then
-        isRacing = true
-        raceEndTime = tick() + CONFIG.RACE_TIMEOUT
-        print("[BOT] Course détectée! Attente...")
-        returnToTapis()
-    elseif isRacing and tick() < raceEndTime then
-        -- Course toujours active, rester sur le tapis
-        returnToTapis()
-    else
-        -- Pas de course, chercher les œufs rares
-        isRacing = false
-        local eggs = detectNearbyEggs()
+    if character:FindFirstChild("Humanoid").Health <= 0 then
+        return
+    end
+    
+    if isHunting and targetEggName and targetPosition then
+        -- Sécurité: timeout après 60 secondes
+        if tick() - lastHuntTime > 60 then
+            log("⏱️ Timeout de chasse")
+            returnToTapis()
+            return
+        end
         
-        if #eggs > 0 then
-            chaseEgg(eggs[1])
+        -- Étape 1: Se diriger vers la zone
+        local distToZone = distance(humanoidRootPart.Position, targetPosition)
+        
+        if distToZone > 15 then
+            moveToPosition(targetPosition)
+            return
+        end
+        
+        -- Étape 2: Chercher l'œuf dans la zone
+        if not targetEggPart or not targetEggPart.Parent then
+            targetEggPart = findEggByName(targetEggName, targetPosition)
+        end
+        
+        if targetEggPart then
+            local dist = distance(humanoidRootPart.Position, targetEggPart.Position)
+            moveToPosition(targetEggPart.Position)
+            onTapis = false
+            
+            -- Vérifier si on l'a pris
+            if dist < 8 then
+                log("💰 ŒUFF " .. targetEggName .. " VOLÉ! ✨")
+                isHunting = false
+                targetEggName = nil
+                targetPosition = nil
+                targetEggPart = nil
+                wait(2)
+                returnToTapis()
+            end
         else
-            -- Aucun œuf détecté, revenir au tapis
+            log("❌ Œuf non trouvé à la zone")
+            isHunting = false
+            targetEggName = nil
+            targetPosition = nil
+            returnToTapis()
+        end
+    else
+        if not onTapis then
             returnToTapis()
         end
     end
 end)
 
 -- =====================================================
--- GESTION DES ENTRÉES CLAVIER
+-- CONTRÔLES CLAVIER
 -- =====================================================
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     
     if input.KeyCode == Enum.KeyCode.P then
-        -- Activer/Désactiver le bot
-        if mainLoop.Connected then
-            mainLoop:Disconnect()
-            print("[BOT] Bot désactivé")
+        if huntLoop.Connected then
+            huntLoop:Disconnect()
+            log("❌ Bot DÉSACTIVÉ")
         else
-            mainLoop = RunService.Heartbeat:Connect(function()
-                -- Redémarrer la boucle
-            end)
-            print("[BOT] Bot activé")
+            huntLoop = RunService.Heartbeat:Connect(function() end)
+            log("✅ Bot ACTIVÉ")
         end
     end
     
     if input.KeyCode == Enum.KeyCode.H then
-        -- Retour d'urgence au tapis
         returnToTapis()
-        print("[BOT] Retour d'urgence au tapis")
+        log("🆘 Annulation")
     end
 end)
 
 -- =====================================================
--- NETTOYAGE
+-- INITIALISATION
 -- =====================================================
 
 player.CharacterAdded:Connect(function(newCharacter)
     character = newCharacter
     humanoidRootPart = character:WaitForChild("HumanoidRootPart")
     onTapis = true
-    lastEggTarget = nil
+    log("🔄 Personnage régénéré")
 end)
 
-print("[BOT] Bot chargé! Appuyez sur P pour activer/désactiver, H pour retour d'urgence")
+-- Configurer l'écoute du chat
+setupChatListener()
+
+log("✅ Bot chargé et prêt!")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("📢 Écoute AUTOMATIQUE du chat")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+log("Format reconnus:")
+log("  'Rare egg: EggRare 50,10,40'")
+log("  'egg: EggGold at zone 100, 20, 50'")
+log("  'Rare egg \"EggLegendary\" X: 75 Y: 15 Z: 30'")
+log("")
+log("Contrôles: P = On/Off | H = Annuler")
+log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
